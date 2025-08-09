@@ -3,9 +3,10 @@ import { Module } from '@nestjs/common';
 import { CacheModule } from '@nestjs/cache-manager';
 import { YoutubeModule } from './youtube/youtube.module';
 import { SongsModule } from './songs/songs.module';
-
+import { PrismaModule } from './prisma/prisma.module';
 import * as redisStore from 'cache-manager-ioredis';
 import { ConfigModule } from '@nestjs/config';
+import { PrismaService } from './prisma/prisma.service';
 
 @Module({
   imports: [
@@ -23,6 +24,8 @@ import { ConfigModule } from '@nestjs/config';
     }),
     YoutubeModule,
     SongsModule,
+    PrismaModule,
   ],
+  providers: [PrismaService],
 })
 export class AppModule { }

@@ -12,6 +12,9 @@ export interface VideoInfo {
 export interface AudioStream {
     videoId: string;
     audioUrl: string;
+    artist: string;
+    title: string;
+    thumbnailUrl: string;
     quality?: number;
     mimeType?: string;
     contentLength?: string;

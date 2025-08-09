@@ -3,6 +3,7 @@ import { CacheModule } from '@nestjs/cache-manager';
 import { YoutubeService } from './youtube.service';
 import { YoutubeController } from './youtube.controller';
 import { UploadService } from '../utils/upload.service';
+import { PrismaService } from '@/prisma/prisma.service';
 
 @Module({
   imports: [
@@ -11,6 +12,6 @@ import { UploadService } from '../utils/upload.service';
     }),
   ],
   controllers: [YoutubeController],
-  providers: [YoutubeService, UploadService],
+  providers: [YoutubeService, UploadService, PrismaService],
 })
 export class YoutubeModule { }

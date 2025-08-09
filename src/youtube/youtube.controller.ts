@@ -1,7 +1,7 @@
-import { Controller, Get, Param, Query, Res, HttpException, HttpStatus } from '@nestjs/common';
-import { Response } from 'express';
+import { Controller, Get, Param, Query, Res, HttpException, HttpStatus, Post, Body } from '@nestjs/common';
 import { YoutubeService } from './youtube.service';
 import { VideoInfo, AudioStream, SearchResult, PlaylistInfo, VideoInfoWithAudio } from '../models/youtube.model';
+import { Response } from 'express';
 
 @Controller('youtube')
 export class YoutubeController {
@@ -15,6 +15,24 @@ export class YoutubeController {
   async getVideoInfo(@Param('videoId') videoId: string): Promise<VideoInfo> {
     try {
       return await this.youtubeService.getVideoInfo(videoId);
+    } catch (error) {
+      throw new HttpException(
+        `Không thể lấy thông tin video: ${error.message}`,
+        HttpStatus.BAD_REQUEST
+      );
+    }
+  }
+
+  /**
+   * Lấy thông tin video batch
+   * POST /youtube/audio/batch
+   * Body: { videoIds: string[] }
+   */
+  @Post('audio/batch')
+  async getBatchAudio(@Body() body: { videoIds: string[] }, @Res() res: Response): Promise<AudioStream[]> {
+    const videoIds = body.videoIds;
+    try {
+      return await this.youtubeService.getBatchVideoInfo(videoIds, res);
     } catch (error) {
       throw new HttpException(
         `Không thể lấy thông tin video: ${error.message}`,
@@ -39,25 +57,6 @@ export class YoutubeController {
         `Không thể tạo audio stream URL: ${error.message}`,
         HttpStatus.BAD_REQUEST
       );
-    }
-  }
-
-  /**
-   * Tạo audio stream trực tiếp
-   * GET /youtube/stream/:videoId?quality=medium
-   */
-  @Get('stream/:videoId')
-  async createAudioStream(
-    @Param('videoId') videoId: string,
-    @Query('quality') quality: 'low' | 'medium' | 'high' = 'medium',
-    @Res() res: Response
-  ): Promise<void> {
-    try {
-      await this.youtubeService.createAudioStream(videoId, res, quality);
-    } catch (error) {
-      res.status(500).json({
-        error: `Không thể tạo audio stream: ${error.message}`
-      });
     }
   }
 
