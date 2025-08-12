@@ -14,6 +14,7 @@ export interface AudioStream {
     audioUrl: string;
     artist: string;
     title: string;
+    duration: string;
     thumbnailUrl: string;
     quality?: number;
     mimeType?: string;

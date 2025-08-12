@@ -30,6 +30,7 @@
   },
   "dependencies": {
     "@distube/ytdl-core": "^4.16.12",
+    "@hydralerne/youtube-api": "^1.1.5",
     "@nestjs/cache-manager": "^3.0.1",
     "@nestjs/common": "^11.1.6",
     "@nestjs/config": "^4.0.2",

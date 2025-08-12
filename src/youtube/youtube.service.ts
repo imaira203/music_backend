@@ -1,348 +1,260 @@
 import { Injectable, Inject } from '@nestjs/common';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager';
-import YTMusic from 'ytmusic-api';
+import { getData, filter, search, getRelatedAndLyrics, getPlaylist, getTrackData, getArtist } from '@hydralerne/youtube-api';
 import { Response } from 'express';
-import { VideoInfo, AudioStream, SearchResult, PlaylistInfo } from '../models/youtube.model';
-import { UploadService } from '../utils/upload.service';
-const ytdl = require("@distube/ytdl-core");
-import * as fs from 'fs';
+import { AudioStream, SearchResult, PlaylistInfo } from '../models/youtube.model';
 import { PrismaService } from '@/prisma/prisma.service';
+import YTMusic from 'ytmusic-api';
+
+// Concurrency helpers
+const CONCURRENCY = 3;
 
 @Injectable()
 export class YoutubeService {
+    // Dedupe in-flight theo videoId để tránh upload/lookup trùng lúc cao điểm
+    private inflightInfo = new Map<string, Promise<any>>();
+    private inflightSong = new Map<string, Promise<{ audioUrl: string }>>();
     private ytmusic = new YTMusic();
 
     constructor(
         @Inject(CACHE_MANAGER) private cache: Cache,
-        private uploadService: UploadService,
-        private prisma: PrismaService
+        private prisma: PrismaService,
     ) {
         this.ytmusic.initialize();
     }
 
-    /**
-     * Lấy thông tin chi tiết của video từ video ID
-     */
-    async getVideoInfo(videoId: string): Promise<VideoInfo> {
+    // ===== Helpers ============================================================
+
+    /** Lấy thông tin bài hát & cache 30 phút (dedupe in-flight) */
+    private async getSongInfoCached(videoId: string): Promise<any> {
+        const key = `song-info-${videoId}`;
+        const cached = await this.cache.get<any>(key);
+        if (cached) return cached;
+
+        if (this.inflightInfo.has(videoId)) return this.inflightInfo.get(videoId)!;
+
+        const p = (async () => {
+            // Lấy metadata từ getData (có formats) và track info từ getTrackData
+            const [videoData, trackInfo] = await Promise.all([
+                getData(videoId),
+                getTrackData(videoId, { isYoutubeMusic: true })
+            ]);
+
+            const artist = await this.ytmusic.getVideo(videoId);
+
+            // Kết hợp thông tin từ cả hai API
+            const info = {
+                ...trackInfo,
+                formats: videoData.formats || videoData,
+                duration: trackInfo.duration || videoData.duration,
+                title: trackInfo.title || videoData.title,
+                artist: artist.artist || videoData.artist?.name
+            };
+
+            await this.cache.set(key, info, 1800);
+            this.inflightInfo.delete(videoId);
+            return info;
+        })().catch((e) => {
+            this.inflightInfo.delete(videoId);
+            throw e;
+        });
+
+        this.inflightInfo.set(videoId, p);
+        return p;
+    }
+
+    /** Đảm bảo đã có audioUrl từ @hydralerne/youtube-api cho videoId: lấy DB, nếu thiếu thì lấy từ API (dedupe in-flight) */
+    private async getOrCreateSongAudio(videoId: string): Promise<{ audioUrl: string }> {
+        const p = (async () => {
+            const videoData = await getData(videoId, { isYoutubeMusic: true });
+
+            const bestAudio = filter(videoData.formats || videoData, 'bestaudio', { minBitrate: 128000 });
+
+            if (!bestAudio || !bestAudio.url) {
+                throw new Error('Không thể lấy audio URL từ YouTube');
+            }
+
+            const audioUrl = bestAudio.url;
+
+            this.inflightSong.delete(videoId);
+            return { audioUrl };
+        })().catch((e) => {
+            this.inflightSong.delete(videoId);
+            throw e;
+        });
+
+        this.inflightSong.set(videoId, p);
+        return p;
+    }
+
+    /** Gộp thành AudioStream trả về client (mime chuẩn & thumb nhanh từ i.ytimg) */
+    private buildAudioStream(videoId: string, info: any, audioUrl: string): AudioStream {
+        return {
+            videoId,
+            title: info?.title || info?.name,
+            artist: info?.artist?.name || info?.author?.name,
+            audioUrl,
+            duration: info?.duration || info?.lengthSeconds,
+            thumbnailUrl: `https://i.ytimg.com/vi/${videoId}/hq720.jpg`,
+            mimeType: 'audio/mp3', // MP3
+            expires: new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString(), // 6h
+        };
+    }
+
+    // Map with limited concurrency
+    private async mapWithConcurrency<I, O>(
+        items: I[],
+        limit: number,
+        fn: (item: I, index: number) => Promise<O>,
+    ): Promise<O[]> {
+        const ret: O[] = [];
+        let i = 0;
+
+        const workers = new Array(Math.min(limit, items.length)).fill(0).map(async () => {
+            while (i < items.length) {
+                const idx = i++;
+                ret[idx] = await fn(items[idx], idx);
+            }
+        });
+
+        await Promise.all(workers);
+        return ret;
+    }
+
+    // ===== APIs ==============================================================
+
+
+
+    /** Batch: chạy song song có giới hạn, dedupe, và tránh upload thừa */
+    async getBatchVideoInfo(videoIds: string[], res?: Response): Promise<AudioStream[]> {
+        // Chuẩn hóa input: trim, dedupe, giới hạn số lượng
+        const ids = Array.from(new Set(videoIds.map(v => v.trim()).filter(Boolean)));
+        const maxBatchSize = 10;
+        if (ids.length > maxBatchSize) {
+            throw new Error(`Số lượng video không được vượt quá ${maxBatchSize}`);
+        }
+
+        // Cache chung cho batch (tùy chọn)
+        const cacheKey = `audio-stream-${ids.join(',')}`;
+        const cached = await this.cache.get<AudioStream[]>(cacheKey);
+        if (cached) {
+            if (res) res.status(200).json(cached);
+            return cached;
+        }
+
+        // Chạy song song có giới hạn
+        const results = await this.mapWithConcurrency(ids, 3, async (id) => {
+            const [info, audio] = await Promise.all([
+                this.getSongInfoCached(id),
+                this.getOrCreateSongAudio(id),
+            ]);
+
+            // Cập nhật DB metadata (không chặn)
+            this.prisma.song
+                .update({
+                    where: { id },
+                    data: {
+                        title: info?.name ?? undefined,
+                        thumbnailUrl: `https://i.ytimg.com/vi/${id}/hq720.jpg`,
+                        duration: info?.duration ?? undefined,
+                        artist: info?.artist?.name ?? undefined,
+                    },
+                })
+                .catch(() => void 0);
+
+            return this.buildAudioStream(id, info, audio.audioUrl);
+        });
+
+        await this.cache.set(cacheKey, results, 1800);
+        if (res) res.status(200).json(results);
+        return results;
+    }
+
+    /** Tạo audio stream URL (giữ lại API cũ, dùng core mới) */
+    async getAudioStreamUrl(videoId: string): Promise<AudioStream> {
+        return this.getVideoInfo(videoId);
+    }
+
+    /** Lấy thông tin video từ @hydralerne/youtube-api */
+    async getVideoInfo(videoId: string): Promise<AudioStream> {
         const cacheKey = `video-info-${videoId}`;
-        const cached = await this.cache.get<VideoInfo>(cacheKey);
+        const cached = await this.cache.get<AudioStream>(cacheKey);
         if (cached) return cached;
 
         try {
-            const songInfo = await this.ytmusic.getSong(videoId);
+            const [info, audio] = await Promise.all([
+                this.getSongInfoCached(videoId),
+                this.getOrCreateSongAudio(videoId),
+            ]);
 
-            const result: VideoInfo = {
-                id: videoId,
-                title: songInfo.name,
-                artist: songInfo.artist?.name,
-                duration: songInfo.duration?.toString(),
-                thumbnailUrl: songInfo.thumbnails?.[0]?.url,
-                videoId: videoId,
-                formats: songInfo.formats || [],
-                adaptiveFormats: songInfo.adaptiveFormats || []
-            };
+            const result = this.buildAudioStream(videoId, info, audio.audioUrl);
 
             // Cache trong 30 phút
             await this.cache.set(cacheKey, result, 1800);
             return result;
         } catch (error) {
+            console.log(error);
             throw new Error(`Không thể lấy thông tin video: ${error.message}`);
         }
     }
 
-    /**
-     * Lấy thông tin video batch
-     * POST /youtube/audio/batch
-     * Body: { videoIds: string[] }
-     */
-    async getBatchVideoInfo(videoIds: string[], res: Response): Promise<AudioStream[]> {
-        // Giới hạn số lượng video được xử lý cùng lúc để tránh quá tải
-        const maxBatchSize = 10;
-        if (videoIds.length > maxBatchSize) {
-            throw new Error(`Số lượng video không được vượt quá ${maxBatchSize}`);
-        }
-        const cacheKey = `audio-stream-${videoIds.join(',')}`;
+    async getRelatedVideos(videoId: string): Promise<AudioStream[]> {
+        const cacheKey = `related-videos-${videoId}`;
         const cached = await this.cache.get<AudioStream[]>(cacheKey);
         if (cached) return cached;
 
-        try {
-            // Query tất cả songs từ database một lần thay vì loop
-            const existingSongs = await this.prisma.song.findMany({
-                where: {
-                    id: {
-                        in: videoIds
-                    }
-                }
-            });
-
-            // Tạo Map để lookup nhanh
-            const songsMap = new Map(existingSongs.map(song => [song.id, song]));
-
-            console.log(songsMap);
-
-            // Kiểm tra cache cho từng song info trước khi gọi API
-            const songInfos: any[] = [];
-            const uncachedVideoIds: string[] = [];
-
-            for (const videoId of videoIds) {
-                const songCacheKey = `song-info-${videoId}`;
-                const cachedSongInfo = await this.cache.get(songCacheKey);
-
-                if (cachedSongInfo) {
-                    songInfos.push(cachedSongInfo);
-                } else {
-                    songInfos.push(null); // placeholder
-                    uncachedVideoIds.push(videoId);
-                }
-            }
-
-            // Chỉ gọi API cho những songs chưa có trong cache
-            if (uncachedVideoIds.length > 0) {
-                const uncachedSongInfoPromises = uncachedVideoIds.map(videoId => this.ytmusic.getSong(videoId));
-                const uncachedSongInfos = await Promise.all(uncachedSongInfoPromises);
-
-                // Cache individual song info và fill vào array
-                let uncachedIndex = 0;
-                for (let i = 0; i < videoIds.length; i++) {
-                    if (songInfos[i] === null) {
-                        const songInfo = uncachedSongInfos[uncachedIndex];
-                        songInfos[i] = songInfo;
-
-                        // Cache individual song info trong 30 phút
-                        const songCacheKey = `song-info-${videoIds[i]}`;
-                        await this.cache.set(songCacheKey, songInfo, 1800);
-                        uncachedIndex++;
-                    }
-                }
-            }
-
-            const result: AudioStream[] = [];
-
-            // Xử lý các video đã có trong database
-            for (let i = 0; i < videoIds.length; i++) {
-                const videoId = videoIds[i];
-                const songInfo = songInfos[i];
-                const existingSong = songsMap.get(videoId);
-
-                let audioUrl: string;
-
-                if (existingSong) {
-                    audioUrl = (existingSong as any).audioUrl;
-                } else {
-                    // Upload và tạo song mới
-                    const uploadResult = await this.uploadService.uploadFile(videoId);
-                    const song = await this.prisma.song.create({
-                        data: {
-                            id: videoId,
-                            title: songInfo.name,
-                            audioUrl: uploadResult.secure_url,
-                            thumbnailUrl: songInfo.thumbnails?.[songInfo.thumbnails.length - 1]?.url,
-                            duration: songInfo.duration,
-                            artist: songInfo.artist?.name,
-                        }
-                    });
-                    audioUrl = song.audioUrl;
-
-                    // Cache song sau khi tạo
-                    const songCacheKey = `song-${videoId}`;
-                    await this.cache.set(songCacheKey, song, 3600); // Cache 1 giờ
-                }
-
-                result.push({
-                    videoId: videoId,
-                    audioUrl: audioUrl,
-                    artist: songInfo.artist?.name,
-                    title: songInfo.name,
-                    thumbnailUrl: songInfo.thumbnails?.[songInfo.thumbnails.length - 1]?.url,
-                    mimeType: "audio/aac",
-                    expires: new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString()
-                });
-            }
-
-            await this.cache.set(cacheKey, result, 1800);
-            res.status(200).json(result);
-            return result;
-        } catch (error) {
-            throw new Error(`Không thể lấy thông tin video: ${error.message}`);
-        }
-    }
-    /**
-     * Tạo audio stream URL cho video
-     */
-    async getAudioStreamUrl(videoId: string, quality: 'low' | 'medium' | 'high' = 'medium'): Promise<AudioStream> {
-        const cacheKey = `audio-stream-${videoId}-${quality}`;
-        const cached = await this.cache.get<AudioStream>(cacheKey);
-        if (cached) return cached;
-
-        try {
-            // Kiểm tra cache cho song info trước
-            const songInfoCacheKey = `song-info-${videoId}`;
-            let detailSong = await this.cache.get(songInfoCacheKey) as any;
-
-            if (!detailSong) {
-                detailSong = await this.ytmusic.getSong(videoId);
-                // Cache song info trong 30 phút
-                await this.cache.set(songInfoCacheKey, detailSong, 1800);
-            }
-
-            // Kiểm tra cache cho database song trước
-            const songCacheKey = `song-${videoId}`;
-            let songExist = await this.cache.get(songCacheKey) as any;
-
-            if (!songExist) {
-                songExist = await this.prisma.song.findUnique({
-                    where: {
-                        id: videoId
-                    }
-                });
-
-                if (songExist) {
-                    // Cache song trong 1 giờ
-                    await this.cache.set(songCacheKey, songExist, 3600);
-                }
-            }
-
-            let audioUrl: string;
-
-            if (!songExist) {
-                const uploadResult = await this.uploadService.uploadFile(videoId);
-                const song = await this.prisma.song.create({
-                    data: {
-                        id: videoId,
-                        title: detailSong.name,
-                        audioUrl: uploadResult.secure_url,
-                        thumbnailUrl: detailSong.thumbnails?.[detailSong.thumbnails.length - 1]?.url,
-                        duration: detailSong.duration,
-                        artist: detailSong.artist?.name,
-                    }
-                });
-                audioUrl = song.audioUrl;
-
-                // Cache newly created song
-                await this.cache.set(songCacheKey, song, 3600);
-            } else {
-                audioUrl = (songExist as any).audioUrl;
-            }
-
-            const result: AudioStream = {
-                videoId,
-                audioUrl: audioUrl,
-                artist: detailSong.artist?.name,
-                title: detailSong.name,
-                thumbnailUrl: detailSong.thumbnails?.[detailSong.thumbnails.length - 1]?.url,
-                mimeType: "audio/aac",
-                expires: new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString()
-            }
-
-            // Cache kết quả cuối cùng với thời gian ngắn hơn vì có expires
-            await this.cache.set(cacheKey, result, 300);
-
-            return result;
-        } catch (error) {
-            throw new Error(`Không thể tạo audio stream URL: ${error.message}`);
-        }
+        const related = await this.ytmusic.getUpNexts(videoId);
+        // lấy ngẫu nhiên 5 video trong danh sách related
+        const randomVideos = related.slice(0, 5);
+        const results = await Promise.all(randomVideos.map(async (video) => {
+            const [info, audio] = await Promise.all([
+                this.getSongInfoCached(video.videoId),
+                this.getOrCreateSongAudio(video.videoId),
+            ]);
+            return this.buildAudioStream(video.videoId, info, audio.audioUrl);
+        }));
+        await this.cache.set(cacheKey, results, 900);
+        return results;
     }
 
-    /**
-     * Lấy danh sách đề xuất dựa trên video ID
-     */
-    async getRelatedVideos(videoId: string, limit: number = 20): Promise<SearchResult[]> {
-        const cacheKey = `related-videos-${videoId}-${limit}`;
-        const cached = await this.cache.get<SearchResult[]>(cacheKey);
-        if (cached) return cached;
-
-        try {
-            // Sử dụng search để lấy related videos
-            const searchResults = await this.ytmusic.search(`${videoId} related`);
-
-            const result: SearchResult[] = searchResults
-                .filter(item => item.type === 'SONG' && 'videoId' in item && item.videoId !== videoId)
-                .slice(0, limit)
-                .map(item => {
-                    if (item.type === 'SONG' && 'videoId' in item) {
-                        return {
-                            id: item.videoId,
-                            title: item.name,
-                            artist: item.artist?.name,
-                            duration: item.duration?.toString(),
-                            thumbnailUrl: item.thumbnails?.[0]?.url,
-                            videoId: item.videoId,
-                        };
-                    }
-                    return null;
-                })
-                .filter(Boolean) as SearchResult[];
-
-            // Cache trong 15 phút
-            await this.cache.set(cacheKey, result, 900);
-            return result;
-        } catch (error) {
-            throw new Error(`Không thể lấy danh sách đề xuất: ${error.message}`);
-        }
-    }
-
-    /**
-     * Tìm kiếm video
-     */
-    async searchVideos(query: string, limit: number = 20): Promise<SearchResult[]> {
+    async searchVideos(query: string, limit = 20): Promise<SearchResult[]> {
         const cacheKey = `search-${query}-${limit}`;
         const cached = await this.cache.get<SearchResult[]>(cacheKey);
         if (cached) return cached;
 
-        try {
-            const searchResults = await this.ytmusic.search(query);
+        const searchResults = await search(query);
+        const result: SearchResult[] = searchResults
+            .filter((i) => i.type === 'SONG' && 'videoId' in i)
+            .slice(0, limit)
+            .map((i: any) => ({
+                id: i.videoId,
+                title: i.name,
+                artist: i.artist?.name,
+                duration: i.duration?.toString(),
+                thumbnailUrl: `https://i.ytimg.com/vi/${i.videoId}/hq720.jpg`,
+                videoId: i.videoId,
+            }));
 
-            const result: SearchResult[] = searchResults
-                .filter(item => item.type === 'SONG' && 'videoId' in item)
-                .slice(0, limit)
-                .map(item => {
-                    if (item.type === 'SONG' && 'videoId' in item) {
-                        return {
-                            id: item.videoId,
-                            title: item.name,
-                            artist: item.artist?.name,
-                            duration: item.duration?.toString(),
-                            thumbnailUrl: item.thumbnails?.[0]?.url,
-                            videoId: item.videoId,
-                        };
-                    }
-                    return null;
-                })
-                .filter(Boolean) as SearchResult[];
-
-            // Cache trong 10 phút
-            await this.cache.set(cacheKey, result, 600);
-            return result;
-        } catch (error) {
-            throw new Error(`Không thể tìm kiếm: ${error.message}`);
-        }
+        await this.cache.set(cacheKey, result, 600);
+        return result;
     }
 
-    /**
-     * Lấy playlist từ playlist ID
-     */
     async getPlaylist(playlistId: string): Promise<PlaylistInfo> {
         const cacheKey = `playlist-${playlistId}`;
         const cached = await this.cache.get<PlaylistInfo>(cacheKey);
         if (cached) return cached;
 
-        try {
-            const playlist = await this.ytmusic.getPlaylist(playlistId);
-
-            const result: PlaylistInfo = {
-                id: playlistId,
-                title: playlist.name,
-                thumbnailUrl: playlist.thumbnails?.[0]?.url,
-                videoCount: playlist.videoCount,
-                songs: [] // Initialize empty array since songs property might not exist
-            };
-
-            // Cache trong 30 phút
-            await this.cache.set(cacheKey, result, 1800);
-            return result;
-        } catch (error) {
-            throw new Error(`Không thể lấy playlist: ${error.message}`);
-        }
+        // @hydralerne/youtube-api không có getPlaylist, sử dụng getData thay thế
+        const playlistData = await getPlaylist(playlistId);
+        const result: PlaylistInfo = {
+            id: playlistId,
+            title: playlistData?.title || playlistData?.name || 'Unknown Playlist',
+            thumbnailUrl: `https://i.ytimg.com/vi/${playlistId}/hq720.jpg`,
+            videoCount: playlistData?.videoCount || 0,
+            songs: [],
+        };
+        await this.cache.set(cacheKey, result, 1800);
+        return result;
     }
 }
