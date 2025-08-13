@@ -17,7 +17,10 @@ export class SongsService {
         const cached = await this.cache.get<any[]>(cacheKey);
         if (cached) return cached;
 
-        const songs = await getHome({ isShorts: false, isYoutubeMusic: true });
+        let songs = await getHome({ isShorts: false, isYoutubeMusic: true });
+        while (!songs.picks || !songs.albums) {
+            songs = await getHome({ isShorts: false, isYoutubeMusic: true });
+        }
         await this.cache.set(cacheKey, songs, 600); // cache 10 phút
         return songs;
     }
