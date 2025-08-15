@@ -6,7 +6,7 @@ export class SongsController {
   constructor(private readonly songsService: SongsService) { }
 
   @Get()
-  @Header('Cache-Control', 'public, max-age=3600')
+  @Header('Cache-Control', 'public, max-age=600')
   getAllSongs() {
     // set cache to header
     // INSERT_YOUR_CODE

@@ -17,11 +17,18 @@ export class SongsService {
         const cached = await this.cache.get<any[]>(cacheKey);
         if (cached) return cached;
 
-        let songs = await getHome({ isShorts: false, isYoutubeMusic: true });
-        while (!songs.picks || !songs.albums) {
-            songs = await getHome({ isShorts: false, isYoutubeMusic: true });
-        }
+        let result = [];
+
+        let songs = await getHome({
+            isYoutubeMusic: true,
+            include_suggestions: true,
+        });
+        result.push(songs);
+
+        let homeSec = await this.ytmusic.getHomeSections();
+        result.push(homeSec);
+
         await this.cache.set(cacheKey, songs, 600); // cache 10 phút
-        return songs;
+        return result;
     }
 }
