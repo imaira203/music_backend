@@ -7,6 +7,8 @@ import { PrismaModule } from './prisma/prisma.module';
 import * as redisStore from 'cache-manager-ioredis';
 import { ConfigModule } from '@nestjs/config';
 import { PrismaService } from './prisma/prisma.service';
+import { AccountsModule } from './accounts/accounts.module';
+import { SearchModule } from './search/search.module';
 
 @Module({
   imports: [
@@ -25,6 +27,8 @@ import { PrismaService } from './prisma/prisma.service';
     YoutubeModule,
     SongsModule,
     PrismaModule,
+    AccountsModule,
+    SearchModule,
   ],
   providers: [PrismaService],
 })

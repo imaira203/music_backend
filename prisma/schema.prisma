@@ -17,3 +17,10 @@ model Song {
   description  String?  @db.Text
   genre        String?
 }
+
+model Accounts {
+  id           BigInt         @id @default(autoincrement())
+  username     String         @db.VarChar(20) @unique
+  password     String         @db.Text
+
+}
