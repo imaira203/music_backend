@@ -15,7 +15,7 @@ async function getAudioUrlYTDLP(videoId) {
     try {
         // Gọi yt-dlp để lấy direct URL stream
         const { stdout } = await execAsync(
-            `yt-dlp -f 140 -g https://www.youtube.com/watch?v=${videoId}`
+            `yt-dlp -f bestaudio -g https://www.youtube.com/watch?v=${videoId}`
         );
         const url = stdout.trim();
 
