@@ -6,6 +6,29 @@ import { Response } from 'express';
 import { AudioStream, SearchResult, PlaylistInfo } from '../models/youtube.model';
 import { PrismaService } from '@/prisma/prisma.service';
 import YTMusic from 'ytmusic-api';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+
+const execAsync = promisify(exec);
+
+async function getAudioUrlYTDLP(videoId) {
+    try {
+        // Gọi yt-dlp để lấy direct URL stream
+        const { stdout } = await execAsync(
+            `yt-dlp -f 140 -g https://www.youtube.com/watch?v=${videoId}`
+        );
+        const url = stdout.trim();
+
+        return {
+            url,
+            itag: 140,
+            mimeType: 'audio/mp4; codecs="mp4a.40.2"',
+        };
+    } catch (err) {
+        console.error('yt-dlp error:', err);
+        throw new Error('Không lấy được audio stream URL');
+    }
+}
 
 // Concurrency helpers
 const CONCURRENCY = 3;
@@ -67,9 +90,11 @@ export class YoutubeService {
     /** Đảm bảo đã có audioUrl từ @hydralerne/youtube-api cho videoId: lấy DB, nếu thiếu thì lấy từ API (dedupe in-flight) */
     private async getOrCreateSongAudio(videoId: string): Promise<{ audioUrl: string }> {
         const p = (async () => {
-            const videoData = await getData(videoId, { isYoutubeMusic: true });
+            // const format = await getData(videoId);
 
-            const bestAudio = filter(videoData.formats || videoData, 'bestaudio', { minBitrate: 128000 });
+            // const bestAudio = filter(format.formats || format, 'bestaudio', { minBitrate: 128000, codec: 'mp4a' });
+
+            const bestAudio = await getAudioUrlYTDLP(videoId);
 
             if (!bestAudio || !bestAudio.url) {
                 throw new Error('Không thể lấy audio URL từ YouTube');
@@ -150,19 +175,6 @@ export class YoutubeService {
                 this.getOrCreateSongAudio(id),
             ]);
 
-            // Cập nhật DB metadata (không chặn)
-            this.prisma.song
-                .update({
-                    where: { id },
-                    data: {
-                        title: info?.name ?? undefined,
-                        thumbnailUrl: `https://i.ytimg.com/vi/${id}/hq720.jpg`,
-                        duration: info?.duration ?? undefined,
-                        artist: info?.artist?.name ?? undefined,
-                    },
-                })
-                .catch(() => void 0);
-
             return this.buildAudioStream(id, info, audio.audioUrl);
         });
 
@@ -188,7 +200,10 @@ export class YoutubeService {
                 this.getOrCreateSongAudio(videoId),
             ]);
 
+            console.log(audio)
+
             const result = this.buildAudioStream(videoId, info, audio.audioUrl);
+            console.log(result);
 
             // Cache trong 30 phút
             await this.cache.set(cacheKey, result, 1800);
