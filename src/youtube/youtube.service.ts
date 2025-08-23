@@ -90,11 +90,11 @@ export class YoutubeService {
     /** Đảm bảo đã có audioUrl từ @hydralerne/youtube-api cho videoId: lấy DB, nếu thiếu thì lấy từ API (dedupe in-flight) */
     private async getOrCreateSongAudio(videoId: string): Promise<{ audioUrl: string }> {
         const p = (async () => {
-            // const format = await getData(videoId);
+            const format = await getData(videoId);
 
-            // const bestAudio = filter(format.formats || format, 'bestaudio', { minBitrate: 128000, codec: 'mp4a' });
+            const bestAudio = filter(format.formats || format, 'bestaudio', { minBitrate: 128000, codec: 'mp4a' });
 
-            const bestAudio = await getAudioUrlYTDLP(videoId);
+            // const bestAudio = await getAudioUrlYTDLP(videoId);
 
             if (!bestAudio || !bestAudio.url) {
                 throw new Error('Không thể lấy audio URL từ YouTube');
