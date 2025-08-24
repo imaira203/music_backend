@@ -205,8 +205,7 @@ export class YoutubeService {
             try {
                 const format = await getData(videoId);
                 const bestAudio = filter(format.formats || format, 'bestaudio', {
-                    minBitrate: 128000,
-                    codec: 'mp4a'
+                    minBitrate: 128000
                 });
 
                 if (!bestAudio || !bestAudio.url) {
