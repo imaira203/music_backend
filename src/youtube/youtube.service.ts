@@ -14,7 +14,7 @@ import { Innertube } from 'youtubei.js';
 const CONCURRENCY_LIMIT = 8;
 const CACHE_TTL = {
     SONG_INFO: 1800,      // 30 minutes
-    AUDIO_URL: 3600,      // 5 hours
+    AUDIO_URL: 3600,      // 1 hour
     RELATED: 3600,         // 15 minutes
     SEARCH: 600,          // 10 minutes
     PLAYLIST: 3600,       // 30 minutes
