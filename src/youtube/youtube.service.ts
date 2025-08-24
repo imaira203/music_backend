@@ -203,16 +203,15 @@ export class YoutubeService {
 
         const promise = this.workerPool.execute(async () => {
             try {
-                const format = await getData(videoId);
-                const bestAudio = filter(format.formats || format, 'bestaudio', {
-                    minBitrate: 128000
-                });
+                const innertube = await Innertube.create();
+                const format = await innertube.getStreamingData(videoId);
+                const bestAudio = format.url;
 
-                if (!bestAudio || !bestAudio.url) {
+                if (!bestAudio) {
                     throw new Error('Không thể lấy audio URL từ YouTube');
                 }
 
-                const result = { audioUrl: bestAudio.url };
+                const result = { audioUrl: bestAudio };
                 await this.setCachedData(key, result, CACHE_TTL.AUDIO_URL);
                 return result;
             } finally {
